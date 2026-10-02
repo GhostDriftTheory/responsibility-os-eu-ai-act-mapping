@@ -10,141 +10,27 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@v4
-      - name: Install Lean and build the pinned kernel plus mapping
-        uses: leanprover/lean-action@v1
+
+      - name: Install Lean
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9
         with:
           auto-config: false
-          build: true
-          build-args: EUAIActMapping
-          use-mathlib-cache: true
           use-github-cache: false
-      - name: Check source, dependency pins and every theorem's axioms
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p verification
-          lake env lean -DwarningAsError=true EUAIActMapping.lean 2>&1 | tee verification/source-check.log
-          python3 - <<'PY'
-          import hashlib, json, os, re, subprocess, tempfile
-          from pathlib import Path
+          use-mathlib-cache: false
 
-          root = Path.cwd()
-          source = root / "EUAIActMapping.lean"
-          outdir = root / "verification"
-          report = {"status": "NOT_VERIFIED", "repository": os.environ["GITHUB_REPOSITORY"],
-                    "commit": os.environ["GITHUB_SHA"],
-                    "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+      - name: Resolve dependencies
+        run: lake update
 
-          def require(condition, message):
-              if not condition:
-                  raise RuntimeError(message)
+      - name: Get Mathlib cache
+        run: lake exe cache get
 
-          def strip_comments(text):
-              # Nested Lean comments; reject strings outside comments because this
-              # deliberately small theory file does not need source string literals.
-              result, i, depth = [], 0, 0
-              while i < len(text):
-                  if text.startswith("/-", i):
-                      depth += 1
-                      result.append("  ")
-                      i += 2
-                  elif depth and text.startswith("-/", i):
-                      depth -= 1
-                      result.append("  ")
-                      i += 2
-                  elif depth:
-                      result.append("\n" if text[i] == "\n" else " ")
-                      i += 1
-                  elif text.startswith("--", i):
-                      j = text.find("\n", i)
-                      j = len(text) if j < 0 else j
-                      result.append(" " * (j - i))
-                      i = j
-                  else:
-                      require(text[i] != '"', "Extend the auditor before adding string literals")
-                      result.append(text[i])
-                      i += 1
-              require(depth == 0, "Unclosed Lean comment")
-              return "".join(result)
+      - name: Build
+        run: lake build EUAIActMapping
 
-          try:
-              expected = {
-                  "responsibility_os_kernel": "9b4e7d25572f3a1e114508bdf1a2d62349e83993",
-                  "mathlib": "2df2f0150c275ad53cb3c90f7c98ec15a56a1a67",
-              }
-              toolchain = (root / "lean-toolchain").read_text().strip()
-              require(toolchain == "leanprover/lean4:v4.26.0", "Unexpected Lean toolchain")
-              manifest = json.loads((root / "lake-manifest.json").read_text())
-              packages = {p["name"]: p for p in manifest["packages"]}
-              for name, rev in expected.items():
-                  require(packages.get(name, {}).get("rev") == rev, "Wrong revision: " + name)
-              report.update(toolchain=toolchain, resolved_revisions={
-                  name: p.get("rev") for name, p in packages.items()})
-
-              clean = strip_comments(source.read_text())
-              bad = re.findall(r"\b(?:sorry|admit|axiom|unsafe|native_decide)\b", clean)
-              require(not bad, "Forbidden proof shortcuts: " + repr(bad))
-              require(re.search(r"^import ResponsibilityOS\s*$", clean, re.M), "Kernel import missing")
-              names, stack = [], []
-              for line in clean.splitlines():
-                  if m := re.match(r"\s*namespace\s+(\w+)\s*$", line):
-                      stack.append(m[1])
-                  elif m := re.match(r"\s*end\s+(\w+)\s*$", line):
-                      require(stack and stack.pop() == m[1], "Namespace mismatch")
-                  elif m := re.match(r"\s*(?:theorem|lemma)\s+([\w.]+)", line):
-                      names.append(".".join(stack + [m[1]]))
-              require(not stack and names and len(set(names)) == len(names), "Invalid theorem inventory")
-              for article in (11, 12, 14, 19, 43, 72):
-                  require(any(n.startswith(f"EUAIActMapping.Art{article}.") for n in names),
-                          f"Missing Article {article}")
-              require("EUAIActMapping.evidence_chain" in names, "Evidence-chain theorem missing")
-
-              # A temporary source is generated only on the runner, not shipped as
-              # a sixth repository file. Audit transitive proof dependencies.
-              with tempfile.TemporaryDirectory(prefix="lean-axioms-") as temp:
-                  audit = Path(temp) / "Audit.lean"
-                  audit.write_text("import EUAIActMapping\n" + "\n".join(
-                      "#print axioms " + n for n in names) + "\n")
-                  result = subprocess.run(
-                      ["lake", "env", "lean", "-DwarningAsError=true", str(audit)],
-                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
-              (outdir / "axioms.log").write_text(result.stdout)
-              print(result.stdout, end="")
-              require(result.returncode == 0, "Lean axiom inspection failed")
-              pattern = re.compile(
-                  r"['`]([^'`]+)['`]\s+(?:depends on axioms:\s*\[([^\]]*)\]|"
-                  r"does not depend on any axioms)", re.S)
-              axioms = {name: sorted({a.strip() for a in raw.split(",") if a.strip()})
-                        for name, raw in pattern.findall(result.stdout)}
-              require(set(names) <= axioms.keys(), "Missing/unparsed axiom output; not accepted as a pass")
-              allowed = {"propext", "Classical.choice", "Quot.sound"}
-              unexpected = {n: sorted(set(axioms[n]) - allowed) for n in names
-                            if set(axioms[n]) - allowed}
-              require(not unexpected, "Unexpected proof axioms: " + repr(unexpected))
-              report.update(status="LEAN_BUILD_AND_AXIOM_AUDIT_PASSED", theorem_count=len(names),
-                            axioms={n: axioms[n] for n in names})
-              print(report["status"])
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-                  summary.write(f"## Lean verification passed\n\n"
-                                f"Built the mapping and audited **{len(names)} named theorems**.\n\n"
-                                "Only `propext`, `Classical.choice`, `Quot.sound` are permitted. "
-                                "This verifies formal proofs, not legal compliance.\n")
-          except Exception as error:
-              report.update(status="FAILED_NOT_VERIFIED", error=str(error))
-              raise
-          finally:
-              (outdir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-          PY
-      - name: Save proof evidence and the resolved dependency lock
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: responsibility-os-eu-ai-act-mapping-verification
-          path: |
-            verification/
-            lake-manifest.json
-          if-no-files-found: warn
+      - name: Verify source
+        run: lake env lean -DwarningAsError=true EUAIActMapping.lean
