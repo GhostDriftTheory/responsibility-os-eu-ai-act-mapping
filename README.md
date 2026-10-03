@@ -19,6 +19,7 @@ Treat a revision as machine-checked only when both `Build mapping` and
 `Verify source with warnings as errors` succeed for that revision. A successful
 run for an earlier revision does not certify newly changed files.
 
+
 ## Five files; no kernel changes
 
 ```text
