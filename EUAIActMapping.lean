@@ -701,7 +701,11 @@ theorem history_evidence_chain
   · intro hNormal
     have hPass : Art72.passesPlan (History.run s commands).profile d plan r = true :=
       (List.mem_filter.mp hNormal).2
-    exact (Bool.and_eq_true.mp (Bool.and_eq_true.mp hPass).1).2
+    cases hSupport : Art11.supportsRecord (History.run s commands).profile d r with
+    | false =>
+        simp [Art72.passesPlan, hSupport] at hPass
+    | true =>
+        exact hSupport
   · intro hFail
     simp [Art72.reviewRecords, hKept, hFail]
   · intro g hRelevant
