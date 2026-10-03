@@ -41,6 +41,8 @@ open CategoryTheory
 
 namespace EUAIActMapping
 
+attribute [local instance] ResponsibilityOS.IndexedAssurance.fiberCategory
+
 /-- Opaque deployment/document keys, not hashes or a model of Annex IV contents. -/
 structure Context where
   system : Nat
