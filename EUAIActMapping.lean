@@ -687,8 +687,10 @@ theorem history_evidence_chain
   have hSame := History.run_without_pruning now commands s s hTime ⟨rfl, rfl, rfl⟩
   have hInitial : ∀ r ∈ s.history, History.Permission r := by simp [hEmpty]
   have hPermission := History.run_permission commands s hInitial
-  have hExport := Art43.recoverable_export_preserves_policy publish recover hRoundTrip
-    (History.run s commands).profile.policy
+  have hExport :
+      ResponsibilityOS.PreservesPolicy publish (History.run s commands).profile.policy :=
+    Art43.recoverable_export_preserves_policy publish recover hRoundTrip
+      (History.run s commands).profile.policy
   refine ⟨hSame.2.2, ?_, Art72.monitoring_preserves_occurrences _ d plan _⟩
   intro r hReference hLive
   have hKept : r ∈ Art19.pruneExpired now (History.run s commands).history := by
