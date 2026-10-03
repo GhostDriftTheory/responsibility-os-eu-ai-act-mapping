@@ -705,7 +705,7 @@ theorem history_evidence_chain
     | false =>
         simp [Art72.passesPlan, hSupport] at hPass
     | true =>
-        exact hSupport
+        rfl
   · intro hFail
     simp [Art72.reviewRecords, hKept, hFail]
   · intro g hRelevant
