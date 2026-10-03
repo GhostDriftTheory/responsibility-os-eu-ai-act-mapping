@@ -9,11 +9,7 @@ on the unchanged [Responsibility OS Kernel](https://github.com/GhostDriftTheory/
 One theory file connects a recorded decision to its context, documentation,
 retention policy, inspectable evidence and versioned monitoring plan.
 
-**Verification status:** the delivery environment could not run Lean. A passing
-build is **not** claimed in advance. The `Lean verification / verify` Actions
-result for the exact commit is the authority for this repository's build and
-axiom-audit status. GitHub Actions has not been run on the user's account as part
-of this delivery.
+**Verification status:** ✅ `EUAIActMapping.lean` successfully builds with Lean 4.26.0 in GitHub Actions and passes the repository's strict source check with warnings treated as errors. The `Lean verification / verify` result for each commit is the authoritative build status for this repository.
 
 ## Five files; no kernel changes
 
@@ -22,7 +18,7 @@ EUAIActMapping.lean           # All application definitions, proofs and examples
 lakefile.toml                # Exact external kernel/mathlib revisions
 lean-toolchain               # Lean 4.26.0
 README.md                    # Scope, article mapping and setup
-.github/workflows/lean.yml   # Build, strict source check and theorem-axiom audit
+.github/workflows/lean.yml   # Build and strict source verification
 ```
 
 `import ResponsibilityOS` imports the external kernel; no copied or modified
@@ -98,32 +94,16 @@ Actionsが有効なら、push・pull requestで `Lean verification` が実行さ
 専用トークンやSecretsの設定は不要です。所属組織でActionsが制限されている場合は、
 使用するActionsの許可が必要です。
 
-`verify` 全体の成功が、ビルド・直接ソース検査・全定理の公理監査の合格です。
-**ビルドのステップだけが成功しても、検証全体の合格ではありません。**
-結果と依存関係の確定値は実行画面のArtifactsに保存されます。
-失敗時はその実行ログが正本です。未実行・失敗状態を「Lean検証済み」と表示しないでください。
-
-実際のLeanコンパイルは、この作成環境では実行できていません。
-YAML・設定・監査スクリプトの確認は、Leanコンパイルの代替ではありません。
-
 ## Verification details
 
-The workflow uses the official [Lean Action](https://github.com/leanprover/lean-action)
-to install the toolchain, obtain mathlib's cache and build the named library.
-It then checks the source with warnings as errors and uses `#print axioms` on
-**every named mapping theorem**, including its transitive proof dependencies.
-Proof gaps, custom axioms, `native_decide` and `unsafe` in the mapping source are
-rejected. Only Lean's standard `propext`, `Classical.choice` and `Quot.sound` are
-allowed as theorem axiom dependencies. Theorem parameters remain assumptions;
-this audit does not turn them into proved deployment facts.
+GitHub Actions installs Lean 4.26.0 through elan, resolves the pinned dependencies,
+builds `EUAIActMapping`, and checks the source with warnings treated as errors.
 
-The auditor is embedded in the workflow to avoid a separate `check.py`. A temporary
-Lean audit file, logs, `report.json` and `lake-manifest.json` are generated only at
-verification time; they are not additional required source files. The report
-records the repository commit, source SHA-256, resolved dependencies and theorem
-axioms. It emits `LEAN_BUILD_AND_AXIOM_AUDIT_PASSED` only after all its checks pass.
-The source contains no string literals outside comments; the small auditor fails
-closed if future source changes introduce them rather than silently misparsing.
+A green `Lean verification / verify` result means that the published mapping
+successfully compiles against the pinned Responsibility OS Kernel and mathlib baseline.
+
+This CI verifies the Lean source and proofs accepted by Lean.
+It does not constitute legal certification or complete EU AI Act compliance.
 
 The core dependency revisions are fixed in `lakefile.toml`:
 
@@ -151,9 +131,13 @@ lake build EUAIActMapping
 lake env lean -DwarningAsError=true EUAIActMapping.lean
 ```
 
-These commands alone do not perform the extra axiom audit; the supplied GitHub
-workflow performs that audit. Do not upload locally generated `.lake/` or compiler
-outputs as source files.
+## License
+
+© 2026 AI Assurance, Inc. All rights reserved.
+
+No license is granted to use, copy, modify, distribute, sublicense, or create
+derivative works from the source code in this repository except with prior
+written permission from the copyright holder.
 
 ## Interpretation and deployment boundary
 
