@@ -14,12 +14,13 @@ using the mapping for a deployment. No application dates are encoded.
 
 Added disclosure: version keys, a logical stop/withhold gate, and a typed event
 log with deadline filtering, explicit document/monitoring-plan version binding,
-and a lossless monitoring partition. No ADIC implementation,
+a lossless monitoring partition, and history-wide preservation under interleaved
+execution, pruning and profile changes. No ADIC implementation,
 private checker, numerical certificate format or physical controller is added.
 
 Assumptions not discharged here:
 * the chosen policy/context adequately represents applicable requirements;
-* observed events, human commands and readiness inputs are authentic/complete;
+* observed events, human commands, profile updates and readiness inputs are authentic/complete;
 * deployed execution cannot bypass `advance`, and its logical halt is connected
   to an appropriate physical safe-state mechanism;
 * clocks/deadlines, durable storage and document identifiers are correctly bound;
@@ -31,8 +32,8 @@ retention, real-world safety or executable replay. The new reference transition
 proves recording/stop properties only for its own mathematical model.
 
 Build status is established by the CI run for the exact repository commit.
-The creation environment could not execute Lean. The accompanying five-file
-repository builds this source and audits every mapping theorem's axioms.
+The accompanying five-file repository builds this source and checks it with
+warnings treated as errors. Its CI does not perform a separate axiom audit.
 -/
 
 universe uE vE uV vV uO vO uF vF
@@ -495,4 +496,213 @@ theorem operation_only_view_fails :
   exact ResponsibilityOS.CollapseCounterexample.U_does_not_preserve_trace_policy
 
 end Examples
+
+namespace History
+
+/-- Interleave existing operations, retention filtering and profile changes.
+A profile change does not erase history or restart a stopped controller. -/
+inductive Command (E : Type uE) [Category.{vE} E] where
+  | attempt (event : Event E) (request : Request) (ready : Bool)
+  | prune (cutoff : Nat)
+  | reprofile (profile : Profile E)
+
+def step (s : State E) : Command E → State E
+  | .attempt e q b => advance s e q b
+  | .prune t => { s with history := Art19.pruneExpired t s.history }
+  | .reprofile p => { s with profile := p }
+
+def run (s : State E) : List (Command E) → State E
+  | [] => s
+  | c :: cs => run (step s c) cs
+
+/-- Reference execution: same operations and profile changes, without deletion. -/
+def withoutPruning : List (Command E) → List (Command E)
+  | [] => []
+  | .prune _ :: cs => withoutPruning cs
+  | c :: cs => c :: withoutPruning cs
+
+/-- No deletion is performed using a cutoff later than the final audit time.
+This does not assert that a supplied clock is authentic or legally appropriate. -/
+def CutoffsWithin (now : Nat) : List (Command E) → Prop
+  | [] => True
+  | .prune t :: cs => t ≤ now ∧ CutoffsWithin now cs
+  | _ :: cs => CutoffsWithin now cs
+
+/-- Retention filters compose without losing an item live at the later cutoff. -/
+theorem prune_twice (earlier later : Nat) (hTime : earlier ≤ later)
+    (history : List (Record E)) :
+    Art19.pruneExpired later (Art19.pruneExpired earlier history) =
+      Art19.pruneExpired later history := by
+  induction history with
+  | nil => rfl
+  | cons r _rs ih =>
+      by_cases hLater : later ≤ r.event.retainUntil
+      · have hEarlier := Nat.le_trans hTime hLater
+        simpa [Art19.pruneExpired, hLater, hEarlier] using congrArg (List.cons r) ih
+      · by_cases hEarlier : earlier ≤ r.event.retainUntil
+        · simpa [Art19.pruneExpired, hLater, hEarlier] using ih
+        · simpa [Art19.pruneExpired, hLater, hEarlier] using ih
+
+/-- Relational invariant: equal control states and equal still-retained histories. -/
+def SameAt (now : Nat) (s t : State E) : Prop :=
+  s.profile = t.profile ∧ s.halted = t.halted ∧
+    Art19.pruneExpired now s.history = Art19.pruneExpired now t.history
+
+private theorem advance_sameAt (now : Nat) (s t : State E)
+    (h : SameAt now s t) (e : Event E) (q : Request) (b : Bool) :
+    SameAt now (advance s e q b) (advance t e q b) := by
+  have hCapture : capture s e q b = capture t e q b := by
+    simp only [capture, h.1, h.2.1]
+  refine ⟨h.1, ?_, ?_⟩
+  · change (capture s e q b).decision.isStopped = (capture t e q b).decision.isStopped
+    rw [hCapture]
+  · change Art19.pruneExpired now (capture s e q b :: s.history) =
+      Art19.pruneExpired now (capture t e q b :: t.history)
+    have hHistory := h.2.2
+    dsimp only [Art19.pruneExpired] at hHistory
+    simp only [Art19.pruneExpired, List.filter_cons]
+    rw [hCapture, hHistory]
+
+/-- Induction over arbitrary interleavings, not a single-record conjunction.
+Dropping intermediate pruning preserves control state and the exact final live
+list, including order and repeated occurrences, when all cutoffs are in range. -/
+theorem run_without_pruning (now : Nat) (commands : List (Command E)) :
+    ∀ s t : State E, CutoffsWithin now commands → SameAt now s t →
+      SameAt now (run s commands) (run t (withoutPruning commands)) := by
+  induction commands with
+  | nil => intro s t _ h; exact h
+  | cons c _cs ih =>
+      intro s t hTime h
+      cases c with
+      | attempt e q b =>
+          exact ih (advance s e q b) (advance t e q b) hTime
+            (advance_sameAt now s t h e q b)
+      | prune cutoff =>
+          apply ih (step s (.prune cutoff)) t hTime.2
+          exact ⟨h.1, h.2.1, (prune_twice cutoff now hTime.1 s.history).trans h.2.2⟩
+      | reprofile p =>
+          exact ih (step s (.reprofile p)) (step t (.reprofile p)) hTime
+            ⟨rfl, h.2.1, h.2.2⟩
+
+/-- Permission is checked against the context captured at execution, not a later
+profile. Reconfiguration must not rewrite the meaning of historical records. -/
+def Permission (r : Record E) : Prop :=
+  r.decision = .executed →
+    r.haltedBefore = false ∧ r.request = .allow ∧ r.ready = true ∧
+      r.event.context = r.profileContext
+
+private theorem step_permission (s : State E) (c : Command E)
+    (h : ∀ r ∈ s.history, Permission r) :
+    ∀ r ∈ (step s c).history, Permission r := by
+  cases c with
+  | attempt e q b =>
+      intro r hMem
+      change r ∈ capture s e q b :: s.history at hMem
+      rcases List.mem_cons.mp hMem with hEq | hOld
+      · subst r
+        exact Art14.execution_requires_current_context s e q b
+      · exact h r hOld
+  | prune _ =>
+      intro r hMem
+      exact h r (List.mem_filter.mp hMem).1
+  | reprofile _ => exact h
+
+theorem run_permission (commands : List (Command E)) :
+    ∀ s : State E, (∀ r ∈ s.history, Permission r) →
+      ∀ r ∈ (run s commands).history, Permission r := by
+  induction commands with
+  | nil => intro s h; exact h
+  | cons c _cs ih => intro s h; exact ih (step s c) (step_permission s c h)
+
+/-- No sequence of pruning, profile changes or attempted operations silently
+restarts a stopped reference controller. -/
+theorem stopped_run_stays_stopped (commands : List (Command E)) :
+    ∀ s : State E, s.halted = true → (run s commands).halted = true := by
+  induction commands with
+  | nil => intro s h; exact h
+  | cons c _cs ih =>
+      intro s h
+      apply ih (step s c)
+      cases c with
+      | attempt e q b => exact Art14.stopped_state_remains_stopped s e q b h
+      | prune _ => exact h
+      | reprofile _ => exact h
+
+/-- Positive case: an allowed, ready operation in the matching context really
+executes, and a subsequent permitted retention filter keeps its record. -/
+theorem live_execution_survives_pruning (s : State E) (e : Event E) (now : Nat)
+    (hHalted : s.halted = false) (hContext : e.context = s.profile.context)
+    (hDeadline : now ≤ e.retainUntil) :
+    (run s [.attempt e .allow true, .prune now]).history =
+        capture s e .allow true :: Art19.pruneExpired now s.history ∧
+      (capture s e .allow true).decision = .executed := by
+  constructor
+  · simp [run, step, advance, Art19.pruneExpired, capture, hDeadline]
+  · simp [capture, gate, hHalted, hContext]
+
+/-- A future-dated deletion really breaks a retrospective live-record claim.
+The cutoff premise above is necessary; it is not a decorative assumption. -/
+theorem future_cutoff_counterexample (r : Record E) :
+    Art19.pruneExpired r.event.retainUntil
+        (Art19.pruneExpired (r.event.retainUntil + 1) [r]) = [] ∧
+      Art19.pruneExpired r.event.retainUntil [r] = [r] := by
+  simp [Art19.pruneExpired]
+
+end History
+
+/-- History-wide chain for an initially empty reference history. Permission is
+DERIVED from execution, not assumed for every output record. All prune cutoffs
+must be no later than `now`. The final document/plan need not match: an unmatched
+record is sent to review, not silently treated as current supporting evidence.
+The export round-trip is an explicit sufficient condition, not an Act requirement.
+Neither actual data capture nor physical execution nor legal adequacy is proved. -/
+theorem history_evidence_chain
+    {V : Type uV} [Category.{vV} V]
+    (s : State E) (hEmpty : s.history = [])
+    (commands : List (History.Command E)) (now : Nat)
+    (hTime : History.CutoffsWithin now commands)
+    (d : Art11.Documentation) (plan : Art72.MonitoringPlan E)
+    (publish : E ⥤ V) (recover : V ⥤ E)
+    (hRoundTrip : publish ⋙ recover = 𝟭 E) :
+    let after := History.run s commands
+    let reference := History.run s (History.withoutPruning commands)
+    let kept := Art19.pruneExpired now after.history
+    kept = Art19.pruneExpired now reference.history ∧
+    (∀ r ∈ reference.history, now ≤ r.event.retainUntil →
+      r ∈ kept ∧ History.Permission r ∧
+      ((r ∈ Art72.normalRecords after.profile d plan kept ∨
+        r ∈ Art72.reviewRecords after.profile d plan kept) ∧
+        ¬ (r ∈ Art72.normalRecords after.profile d plan kept ∧
+          r ∈ Art72.reviewRecords after.profile d plan kept)) ∧
+      (r ∈ Art72.normalRecords after.profile d plan kept →
+        Art11.supportsRecord after.profile d r = true) ∧
+      (Art72.passesPlan after.profile d plan r = false →
+        r ∈ Art72.reviewRecords after.profile d plan kept) ∧
+      (∀ g : r.event.source ⟶ r.event.target,
+        after.profile.policy.relevant r.event.trace g →
+          publish.map r.event.trace ≠ publish.map g)) ∧
+    (Art72.normalRecords after.profile d plan kept).length +
+      (Art72.reviewRecords after.profile d plan kept).length = kept.length := by
+  dsimp only
+  have hSame := History.run_without_pruning now commands s s hTime ⟨rfl, rfl, rfl⟩
+  have hInitial : ∀ r ∈ s.history, History.Permission r := by simp [hEmpty]
+  have hPermission := History.run_permission commands s hInitial
+  have hExport := Art43.recoverable_export_preserves_policy publish recover hRoundTrip
+    (History.run s commands).profile.policy
+  refine ⟨hSame.2.2, ?_, Art72.monitoring_preserves_occurrences _ d plan _⟩
+  intro r hReference hLive
+  have hKept : r ∈ Art19.pruneExpired now (History.run s commands).history := by
+    rw [hSame.2.2]
+    exact Art19.no_early_deletion now _ r hReference hLive
+  refine ⟨hKept, hPermission r (List.mem_filter.mp hKept).1,
+    Art72.monitoring_complete _ d plan _ r hKept, ?_, ?_, ?_⟩
+  · intro hNormal
+    have hPass : Art72.passesPlan (History.run s commands).profile d plan r = true :=
+      (List.mem_filter.mp hNormal).2
+    exact (Bool.and_eq_true.mp (Bool.and_eq_true.mp hPass).1).2
+  · intro hFail
+    simp [Art72.reviewRecords, hKept, hFail]
+  · intro g hRelevant
+    exact hExport hRelevant
+
 end EUAIActMapping
