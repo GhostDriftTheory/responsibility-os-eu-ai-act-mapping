@@ -1,5 +1,7 @@
 # Responsibility OS × EU AI Act
 
+[![Lean verification](https://github.com/GhostDriftTheory/responsibility-os-eu-ai-act-mapping/actions/workflows/lean.yml/badge.svg)](https://github.com/GhostDriftTheory/responsibility-os-eu-ai-act-mapping/actions/workflows/lean.yml)
+
 **Repository:** `GhostDriftTheory/responsibility-os-eu-ai-act-mapping`
 
 Selected formal assurance profiles for Articles **11, 12, 14, 19, 43 and 72**, built
